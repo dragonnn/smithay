@@ -461,7 +461,8 @@ impl Space {
         output: &Output,
         age: usize,
         clear_color: [f32; 4],
-        custom_elements: &[DynamicRenderElements<R>],
+        bottom_custom_elements: &[DynamicRenderElements<R>],
+        top_custom_elements: &[DynamicRenderElements<R>],
     ) -> Result<Option<Vec<Rectangle<i32, Logical>>>, RenderError<R>>
     where
         R: Renderer + ImportAll + 'static,
@@ -508,10 +509,11 @@ impl Space {
                     .windows
                     .iter()
                     .map(|w| w as &SpaceElem<R>)
+                    .chain(bottom_custom_elements.iter().map(|p| p as &SpaceElem<R>))
                     .chain(window_popups.iter().map(|p| p as &SpaceElem<R>))
                     .chain(layer_map.layers().map(|l| l as &SpaceElem<R>))
                     .chain(layer_popups.iter().map(|p| p as &SpaceElem<R>))
-                    .chain(custom_elements.iter().map(|c| c as &SpaceElem<R>))
+                    .chain(top_custom_elements.iter().map(|c| c as &SpaceElem<R>))
                     .any(|e| ToplevelId::from(e) == *id)
                 {
                     Some(*geo)
@@ -530,10 +532,11 @@ impl Space {
             .windows
             .iter()
             .map(|w| w as &SpaceElem<R>)
+            .chain(bottom_custom_elements.iter().map(|c| c as &SpaceElem<R>))
             .chain(window_popups.iter().map(|p| p as &SpaceElem<R>))
             .chain(layer_map.layers().map(|l| l as &SpaceElem<R>))
             .chain(layer_popups.iter().map(|p| p as &SpaceElem<R>))
-            .chain(custom_elements.iter().map(|c| c as &SpaceElem<R>))
+            .chain(top_custom_elements.iter().map(|c| c as &SpaceElem<R>))
         {
             let geo = element.geometry(self.id);
             let old_geo = state.last_state.get(&ToplevelId::from(element)).cloned();
@@ -613,6 +616,7 @@ impl Space {
                     .layers_on(WlrLayer::Background)
                     .chain(layer_map.layers_on(WlrLayer::Bottom))
                     .map(|l| l as &SpaceElem<R>)
+                    .chain(bottom_custom_elements.iter().map(|c| c as &SpaceElem<R>))
                     .chain(self.windows.iter().map(|w| w as &SpaceElem<R>))
                     .chain(
                         layer_map
@@ -620,7 +624,7 @@ impl Space {
                             .chain(layer_map.layers_on(WlrLayer::Overlay))
                             .map(|l| l as &SpaceElem<R>),
                     )
-                    .chain(custom_elements.iter().map(|c| c as &SpaceElem<R>))
+                    .chain(top_custom_elements.iter().map(|c| c as &SpaceElem<R>))
                 {
                     let geo = element.geometry(self.id);
                     if damage.iter().any(|d| d.overlaps(geo)) {
@@ -665,10 +669,11 @@ impl Space {
             .windows
             .iter()
             .map(|w| w as &SpaceElem<R>)
+            .chain(bottom_custom_elements.iter().map(|c| c as &SpaceElem<R>))
             .chain(window_popups.iter().map(|p| p as &SpaceElem<R>))
             .chain(layer_map.layers().map(|l| l as &SpaceElem<R>))
             .chain(layer_popups.iter().map(|p| p as &SpaceElem<R>))
-            .chain(custom_elements.iter().map(|c| c as &SpaceElem<R>))
+            .chain(top_custom_elements.iter().map(|c| c as &SpaceElem<R>))
             .map(|elem| {
                 let geo = elem.geometry(self.id);
                 (ToplevelId::from(elem), geo)
