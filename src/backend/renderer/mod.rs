@@ -10,7 +10,7 @@
 use std::collections::HashSet;
 use std::error::Error;
 
-use crate::utils::{Buffer, Coordinate, Physical, Point, Rectangle, Size};
+use crate::utils::{Buffer, Physical, Point, Rectangle, Size, Transform};
 
 #[cfg(feature = "wayland_frontend")]
 use crate::wayland::compositor::SurfaceData;
@@ -36,27 +36,6 @@ use crate::backend::egl::{
 pub mod utils;
 
 #[derive(Debug, PartialEq, Eq, Hash, Clone, Copy)]
-/// Possible transformations to two-dimensional planes
-pub enum Transform {
-    /// Identity transformation (plane is unaltered when applied)
-    Normal,
-    /// Plane is rotated by 90 degrees
-    _90,
-    /// Plane is rotated by 180 degrees
-    _180,
-    /// Plane is rotated by 270 degrees
-    _270,
-    /// Plane is flipped vertically
-    Flipped,
-    /// Plane is flipped vertically and rotated by 90 degrees
-    Flipped90,
-    /// Plane is flipped vertically and rotated by 180 degrees
-    Flipped180,
-    /// Plane is flipped vertically and rotated by 270 degrees
-    Flipped270,
-}
-
-#[derive(Debug, PartialEq, Eq, Hash, Clone, Copy)]
 /// Texture filtering methods
 pub enum TextureFilter {
     /// Returns the value of the texture element that is nearest (in Manhattan distance) to the center of the pixel being textured.
@@ -74,38 +53,9 @@ impl Transform {
             Transform::_180 => Matrix3::new(-1.0, 0.0, 0.0, 0.0, -1.0, 0.0, 0.0, 0.0, 1.0),
             Transform::_270 => Matrix3::new(0.0, 1.0, 0.0, -1.0, 0.0, 0.0, 0.0, 0.0, 1.0),
             Transform::Flipped => Matrix3::new(-1.0, 0.0, 0.0, 0.0, 1.0, 0.0, 0.0, 0.0, 1.0),
-            Transform::Flipped90 => Matrix3::new(0.0, 1.0, 0.0, 1.0, 0.0, 0.0, 0.0, 0.0, 1.0),
+            Transform::Flipped90 => Matrix3::new(0.0, -1.0, 0.0, -1.0, 0.0, 0.0, 0.0, 0.0, 1.0),
             Transform::Flipped180 => Matrix3::new(1.0, 0.0, 0.0, 0.0, -1.0, 0.0, 0.0, 0.0, 1.0),
-            Transform::Flipped270 => Matrix3::new(0.0, -1.0, 0.0, -1.0, 0.0, 0.0, 0.0, 0.0, 1.0),
-        }
-    }
-
-    /// Inverts any 90-degree transformation into 270-degree transformations and vise versa.
-    ///
-    /// Flipping is preserved and 180/Normal transformation are uneffected.
-    pub fn invert(&self) -> Transform {
-        match self {
-            Transform::Normal => Transform::Normal,
-            Transform::Flipped => Transform::Flipped,
-            Transform::_90 => Transform::_270,
-            Transform::_180 => Transform::_180,
-            Transform::_270 => Transform::_90,
-            Transform::Flipped90 => Transform::Flipped270,
-            Transform::Flipped180 => Transform::Flipped180,
-            Transform::Flipped270 => Transform::Flipped90,
-        }
-    }
-
-    /// Transformed size after applying this transformation.
-    pub fn transform_size<N: Coordinate, Kind>(&self, size: Size<N, Kind>) -> Size<N, Kind> {
-        if *self == Transform::_90
-            || *self == Transform::_270
-            || *self == Transform::Flipped90
-            || *self == Transform::Flipped270
-        {
-            (size.h, size.w).into()
-        } else {
-            size
+            Transform::Flipped270 => Matrix3::new(0.0, 1.0, 0.0, 1.0, 0.0, 0.0, 0.0, 0.0, 1.0),
         }
     }
 }
@@ -187,7 +137,7 @@ pub trait Frame {
         texture_scale: i32,
         output_scale: f64,
         src_transform: Transform,
-        damage: &[Rectangle<i32, Physical>],
+        damage: &[Rectangle<i32, Buffer>],
         alpha: f32,
     ) -> Result<(), Self::Error> {
         self.render_texture_from_to(
@@ -197,7 +147,7 @@ pub trait Frame {
                 pos,
                 texture
                     .size()
-                    .to_logical(texture_scale)
+                    .to_logical(texture_scale, src_transform)
                     .to_f64()
                     .to_physical(output_scale),
             ),
@@ -215,10 +165,13 @@ pub trait Frame {
         texture: &Self::TextureId,
         src: Rectangle<i32, Buffer>,
         dst: Rectangle<f64, Physical>,
-        damage: &[Rectangle<i32, Physical>],
+        damage: &[Rectangle<i32, Buffer>],
         src_transform: Transform,
         alpha: f32,
     ) -> Result<(), Self::Error>;
+
+    /// Output transformation that is applied to this frame
+    fn transformation(&self) -> Transform;
 }
 
 /// Abstraction of commonly used rendering operations for compositors.
@@ -507,7 +460,7 @@ pub fn buffer_type(buffer: &wl_buffer::WlBuffer) -> Option<BufferType> {
 ///
 /// *Note*: This will only return dimensions for buffer types known to smithay (see [`buffer_type`])
 #[cfg(feature = "wayland_frontend")]
-pub fn buffer_dimensions(buffer: &wl_buffer::WlBuffer) -> Option<Size<i32, Physical>> {
+pub fn buffer_dimensions(buffer: &wl_buffer::WlBuffer) -> Option<Size<i32, Buffer>> {
     use crate::backend::allocator::Buffer;
 
     if let Some(buf) = buffer.as_ref().user_data().get::<Dmabuf>() {

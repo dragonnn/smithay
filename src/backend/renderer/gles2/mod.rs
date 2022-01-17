@@ -13,7 +13,7 @@ use cgmath::{prelude::*, Matrix3, Vector2, Vector3};
 mod shaders;
 mod version;
 
-use super::{Bind, Frame, Renderer, Texture, TextureFilter, Transform, Unbind};
+use super::{Bind, Frame, Renderer, Texture, TextureFilter, Unbind};
 use crate::backend::allocator::{
     dmabuf::{Dmabuf, WeakDmabuf},
     Format,
@@ -23,7 +23,7 @@ use crate::backend::egl::{
     EGLContext, EGLSurface, MakeCurrentError,
 };
 use crate::backend::SwapBuffersError;
-use crate::utils::{Buffer, Physical, Rectangle, Size};
+use crate::utils::{Buffer, Physical, Rectangle, Size, Transform};
 
 #[cfg(all(feature = "wayland_frontend", feature = "use_system_lib"))]
 use super::ImportEgl;
@@ -178,6 +178,8 @@ pub struct Gles2Renderer {
     // This field is only accessed if the image or wayland_frontend features are active
     #[allow(dead_code)]
     destruction_callback_sender: Sender<CleanupResource>,
+    min_filter: TextureFilter,
+    max_filter: TextureFilter,
     logger_ptr: Option<*mut ::slog::Logger>,
     logger: ::slog::Logger,
     _not_send: *mut (),
@@ -186,11 +188,14 @@ pub struct Gles2Renderer {
 /// Handle to the currently rendered frame during [`Gles2Renderer::render`](Renderer::render)
 pub struct Gles2Frame {
     current_projection: Matrix3<f32>,
+    transform: Transform,
     gl: ffi::Gles2,
     tex_programs: [Gles2TexProgram; shaders::FRAGMENT_COUNT],
     solid_program: Gles2SolidProgram,
     vbos: [ffi::types::GLuint; 2],
     size: Size<i32, Physical>,
+    min_filter: TextureFilter,
+    max_filter: TextureFilter,
 }
 
 impl fmt::Debug for Gles2Frame {
@@ -200,6 +205,8 @@ impl fmt::Debug for Gles2Frame {
             .field("tex_programs", &self.tex_programs)
             .field("solid_program", &self.solid_program)
             .field("size", &self.size)
+            .field("min_filter", &self.min_filter)
+            .field("max_filter", &self.max_filter)
             .finish_non_exhaustive()
     }
 }
@@ -215,6 +222,8 @@ impl fmt::Debug for Gles2Renderer {
             .field("solid_program", &self.solid_program)
             // ffi::Gles2 does not implement Debug
             .field("egl", &self.egl)
+            .field("min_filter", &self.min_filter)
+            .field("max_filter", &self.max_filter)
             .field("logger", &self.logger)
             .finish()
     }
@@ -521,7 +530,7 @@ impl Gles2Renderer {
         gl.BindBuffer(ffi::ARRAY_BUFFER, 0);
 
         let (tx, rx) = channel();
-        let mut renderer = Gles2Renderer {
+        let renderer = Gles2Renderer {
             gl,
             egl: context,
             #[cfg(all(feature = "wayland_frontend", feature = "use_system_lib"))]
@@ -537,12 +546,12 @@ impl Gles2Renderer {
             destruction_callback: rx,
             destruction_callback_sender: tx,
             vbos,
+            min_filter: TextureFilter::Nearest,
+            max_filter: TextureFilter::Linear,
             logger_ptr,
             logger: log,
             _not_send: std::ptr::null_mut(),
         };
-        renderer.downscale_filter(TextureFilter::Nearest)?;
-        renderer.upscale_filter(TextureFilter::Linear)?;
         renderer.egl.unbind()?;
         Ok(renderer)
     }
@@ -635,7 +644,6 @@ impl ImportShm for Gles2Renderer {
 
             unsafe {
                 self.gl.BindTexture(ffi::TEXTURE_2D, texture.0.texture);
-
                 self.gl
                     .TexParameteri(ffi::TEXTURE_2D, ffi::TEXTURE_WRAP_S, ffi::CLAMP_TO_EDGE as i32);
                 self.gl
@@ -1017,12 +1025,25 @@ impl Drop for Gles2Renderer {
 }
 
 impl Gles2Renderer {
+    /// Get access to the underlying [`EGLContext`].
+    ///
+    /// *Note*: Modifying the context state, might result in rendering issues.
+    /// The context state is considerd an implementation detail
+    /// and no guarantee is made about what can or cannot be changed.
+    /// To make sure a certain modification does not interfere with
+    /// the renderer's behaviour, check the source.
+    pub fn egl_context(&self) -> &EGLContext {
+        &self.egl
+    }
+
     /// Run custom code in the GL context owned by this renderer.
     ///
-    /// *Note*: Any changes to the GL state should be restored at the end of this function.
-    /// Otherwise this can lead to rendering errors while using functions of this renderer.
-    /// Relying on any state set by the renderer may break on any smithay update as the
-    /// details about how this renderer works are considered an implementation detail.
+    /// The OpenGL state of the renderer is considered an implementation detail
+    /// and no guarantee is made about what can or cannot be changed,
+    /// as such you should reset everything you change back to its previous value
+    /// or check the source code of the version of Smithay you are using to ensure
+    /// your changes don't interfere with the renderer's behavior.
+    /// Doing otherwise can lead to rendering errors while using other functions of this renderer.
     pub fn with_context<F, R>(&mut self, func: F) -> Result<R, Gles2Error>
     where
         F: FnOnce(&mut Self, &ffi::Gles2) -> R,
@@ -1039,31 +1060,11 @@ impl Renderer for Gles2Renderer {
     type Frame = Gles2Frame;
 
     fn downscale_filter(&mut self, filter: TextureFilter) -> Result<(), Self::Error> {
-        self.make_current()?;
-        unsafe {
-            self.gl.TexParameteri(
-                ffi::TEXTURE_2D,
-                ffi::TEXTURE_MIN_FILTER,
-                match filter {
-                    TextureFilter::Nearest => ffi::NEAREST as i32,
-                    TextureFilter::Linear => ffi::LINEAR as i32,
-                },
-            );
-        }
+        self.min_filter = filter;
         Ok(())
     }
     fn upscale_filter(&mut self, filter: TextureFilter) -> Result<(), Self::Error> {
-        self.make_current()?;
-        unsafe {
-            self.gl.TexParameteri(
-                ffi::TEXTURE_2D,
-                ffi::TEXTURE_MAG_FILTER,
-                match filter {
-                    TextureFilter::Nearest => ffi::NEAREST as i32,
-                    TextureFilter::Linear => ffi::LINEAR as i32,
-                },
-            );
-        }
+        self.max_filter = filter;
         Ok(())
     }
 
@@ -1116,8 +1117,11 @@ impl Renderer for Gles2Renderer {
             solid_program: self.solid_program.clone(),
             // output transformation passed in by the user
             current_projection: flip180 * transform.matrix() * renderer,
+            transform,
             vbos: self.vbos,
             size,
+            min_filter: self.min_filter,
+            max_filter: self.max_filter,
         };
 
         let result = rendering(self, &mut frame);
@@ -1246,7 +1250,7 @@ impl Frame for Gles2Frame {
         texture: &Self::TextureId,
         src: Rectangle<i32, Buffer>,
         dest: Rectangle<f64, Physical>,
-        damage: &[Rectangle<i32, Physical>],
+        damage: &[Rectangle<i32, Buffer>],
         transform: Transform,
         alpha: f32,
     ) -> Result<(), Self::Error> {
@@ -1262,7 +1266,7 @@ impl Frame for Gles2Frame {
             assert_eq!(mat, mat * transform.invert().matrix());
             assert_eq!(transform.matrix(), Matrix3::<f32>::identity());
         }
-        mat = mat * transform.invert().matrix();
+        mat = mat * transform.matrix();
         mat = mat * Matrix3::from_translation(Vector2::new(-0.5, -0.5));
 
         // this matrix should be regular, we can expect invert to succeed
@@ -1286,24 +1290,34 @@ impl Frame for Gles2Frame {
         let damage = damage
             .iter()
             .map(|rect| {
+                let src = src.size.to_f64();
                 let rect = rect.to_f64();
 
                 let rect_constrained_loc = rect
                     .loc
-                    .constrain(Rectangle::from_extemities((0f64, 0f64), dest.size.to_point()));
-                let rect_clamped_size = rect.size.clamp((0f64, 0f64), dest.size);
+                    .constrain(Rectangle::from_extemities((0f64, 0f64), src.to_point()));
+                let rect_clamped_size = rect
+                    .size
+                    .clamp((0f64, 0f64), (src.to_point() - rect_constrained_loc).to_size());
+
+                let rect = Rectangle::from_loc_and_size(rect_constrained_loc, rect_clamped_size);
+                let rect_transformed = self.transformation().transform_rect_in(rect, &src);
 
                 [
-                    (rect_constrained_loc.x / dest.size.w) as f32,
-                    (rect_constrained_loc.y / dest.size.h) as f32,
-                    (rect_clamped_size.w / dest.size.w) as f32,
-                    (rect_clamped_size.h / dest.size.h) as f32,
+                    (rect_transformed.loc.x / src.w) as f32,
+                    (rect_transformed.loc.y / src.h) as f32,
+                    (rect_transformed.size.w / src.w) as f32,
+                    (rect_transformed.size.h / src.h) as f32,
                 ]
             })
             .flatten()
             .collect::<Vec<_>>();
 
         self.render_texture(texture, mat, Some(&damage), tex_verts, alpha)
+    }
+
+    fn transformation(&self) -> Transform {
+        self.transform
     }
 }
 
@@ -1331,8 +1345,22 @@ impl Gles2Frame {
         unsafe {
             self.gl.ActiveTexture(ffi::TEXTURE0);
             self.gl.BindTexture(target, tex.0.texture);
-            self.gl
-                .TexParameteri(target, ffi::TEXTURE_MIN_FILTER, ffi::LINEAR as i32);
+            self.gl.TexParameteri(
+                ffi::TEXTURE_2D,
+                ffi::TEXTURE_MIN_FILTER,
+                match self.min_filter {
+                    TextureFilter::Nearest => ffi::NEAREST as i32,
+                    TextureFilter::Linear => ffi::LINEAR as i32,
+                },
+            );
+            self.gl.TexParameteri(
+                ffi::TEXTURE_2D,
+                ffi::TEXTURE_MAG_FILTER,
+                match self.max_filter {
+                    TextureFilter::Nearest => ffi::NEAREST as i32,
+                    TextureFilter::Linear => ffi::LINEAR as i32,
+                },
+            );
             self.gl.UseProgram(self.tex_programs[tex.0.texture_kind].program);
 
             self.gl
@@ -1414,5 +1442,10 @@ impl Gles2Frame {
         }
 
         Ok(())
+    }
+
+    /// Projection matrix for this frame
+    pub fn projection(&self) -> &[f32; 9] {
+        self.current_projection.as_ref()
     }
 }

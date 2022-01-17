@@ -2,12 +2,12 @@
 //! rendering helpers to add custom elements or different clients to a space.
 
 use crate::{
-    backend::renderer::{utils::SurfaceState, Frame, ImportAll, Renderer, Transform},
+    backend::renderer::{utils::SurfaceState, Frame, ImportAll, Renderer},
     desktop::{
         layer::{layer_map_for_output, LayerSurface},
         window::Window,
     },
-    utils::{Logical, Point, Rectangle},
+    utils::{Logical, Point, Rectangle, Transform},
     wayland::{
         compositor::{
             get_parent, is_sync_subsurface, with_surface_tree_downward, SubsurfaceCachedState,
@@ -24,6 +24,7 @@ use wayland_server::protocol::wl_surface::WlSurface;
 mod element;
 mod layer;
 mod output;
+mod popup;
 mod window;
 
 pub use self::element::*;
@@ -371,7 +372,7 @@ impl Space {
                         |wl_surface, states, &loc| {
                             let data = states.data_map.get::<RefCell<SurfaceState>>();
 
-                            if let Some(size) = data.and_then(|d| d.borrow().size()) {
+                            if let Some(size) = data.and_then(|d| d.borrow().surface_size()) {
                                 let surface_rectangle = Rectangle { loc, size };
 
                                 if output_geometry.overlaps(surface_rectangle) {
@@ -486,6 +487,16 @@ impl Space {
         let output_geo = Rectangle::from_loc_and_size(state.location, output_size);
         let layer_map = layer_map_for_output(output);
 
+        let window_popups = self
+            .windows
+            .iter()
+            .flat_map(|w| w.popup_elements::<R>(self.id))
+            .collect::<Vec<_>>();
+        let layer_popups = layer_map
+            .layers()
+            .flat_map(|l| l.popup_elements::<R>(self.id))
+            .collect::<Vec<_>>();
+
         // This will hold all the damage we need for this rendering step
         let mut damage = Vec::<Rectangle<i32, Logical>>::new();
         // First add damage for windows gone
@@ -497,7 +508,9 @@ impl Space {
                     .windows
                     .iter()
                     .map(|w| w as &SpaceElem<R>)
+                    .chain(window_popups.iter().map(|p| p as &SpaceElem<R>))
                     .chain(layer_map.layers().map(|l| l as &SpaceElem<R>))
+                    .chain(layer_popups.iter().map(|p| p as &SpaceElem<R>))
                     .chain(custom_elements.iter().map(|c| c as &SpaceElem<R>))
                     .any(|e| ToplevelId::from(e) == *id)
                 {
@@ -517,7 +530,9 @@ impl Space {
             .windows
             .iter()
             .map(|w| w as &SpaceElem<R>)
+            .chain(window_popups.iter().map(|p| p as &SpaceElem<R>))
             .chain(layer_map.layers().map(|l| l as &SpaceElem<R>))
+            .chain(layer_popups.iter().map(|p| p as &SpaceElem<R>))
             .chain(custom_elements.iter().map(|c| c as &SpaceElem<R>))
         {
             let geo = element.geometry(self.id);
@@ -557,12 +572,15 @@ impl Space {
         damage.retain(|rect| rect.overlaps(output_geo));
         damage.retain(|rect| rect.size.h > 0 && rect.size.w > 0);
         // merge overlapping rectangles
-        damage = damage.into_iter().fold(Vec::new(), |mut new_damage, rect| {
-            if let Some(existing) = new_damage.iter_mut().find(|other| rect.overlaps(**other)) {
-                *existing = existing.merge(rect);
-            } else {
-                new_damage.push(rect);
+        damage = damage.into_iter().fold(Vec::new(), |new_damage, mut rect| {
+            // replace with drain_filter, when that becomes stable to reuse the original Vec's memory
+            let (overlapping, mut new_damage): (Vec<_>, Vec<_>) =
+                new_damage.into_iter().partition(|other| other.overlaps(rect));
+
+            for overlap in overlapping {
+                rect = rect.merge(overlap);
             }
+            new_damage.push(rect);
             new_damage
         });
 
@@ -647,7 +665,9 @@ impl Space {
             .windows
             .iter()
             .map(|w| w as &SpaceElem<R>)
+            .chain(window_popups.iter().map(|p| p as &SpaceElem<R>))
             .chain(layer_map.layers().map(|l| l as &SpaceElem<R>))
+            .chain(layer_popups.iter().map(|p| p as &SpaceElem<R>))
             .chain(custom_elements.iter().map(|c| c as &SpaceElem<R>))
             .map(|elem| {
                 let geo = elem.geometry(self.id);
